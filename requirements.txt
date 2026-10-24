@@ -3,3 +3,5 @@ uvicorn[standard]
 google-genai
 pydantic
 python-dotenv
+edge-tts>=6.1.0
+gTTS>=2.5.0

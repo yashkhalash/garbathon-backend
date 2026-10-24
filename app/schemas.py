@@ -65,3 +65,34 @@ class TTSRequest(BaseModel):
 class TTSResponse(BaseModel):
     audio_b64: str
     mime_type: str = "audio/mp3"
+
+class GeminiModelInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+    is_recommended: bool = False
+
+class GeminiSettingsResponse(BaseModel):
+    model: str
+    has_active_key: bool
+    has_custom_key: bool
+    masked_key: str
+    status: Literal["active", "invalid", "rate_limited", "not_configured"]
+    status_message: str
+    latency_ms: float | None = None
+    supported_models: list[GeminiModelInfo]
+
+class UpdateGeminiSettingsRequest(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+
+class TestGeminiKeyRequest(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+
+class TestGeminiKeyResponse(BaseModel):
+    is_active: bool
+    status: Literal["active", "invalid", "rate_limited", "not_configured", "error"]
+    status_message: str
+    latency_ms: float | None = None
+    model: str

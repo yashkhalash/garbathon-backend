@@ -7,12 +7,133 @@ from google.genai import types
 from app.config import GEMINI_API_KEY, GEMINI_MODEL
 from app.schemas import AnalyzeResponse, RedFlagItem
 
+_runtime_api_key: str | None = None
+_runtime_model: str = GEMINI_MODEL
 _client: genai.Client | None = None
+
+SUPPORTED_MODELS = [
+    {
+        "id": "gemini-2.5-flash",
+        "name": "Gemini 2.5 Flash",
+        "description": "Recommended: Ultra-fast native audio understanding, lowest latency, high rate limits.",
+        "is_recommended": True,
+    },
+    {
+        "id": "gemini-2.0-flash",
+        "name": "Gemini 2.0 Flash",
+        "description": "Next-gen fast multimodal reasoning model.",
+        "is_recommended": False,
+    },
+    {
+        "id": "gemini-1.5-flash",
+        "name": "Gemini 1.5 Flash",
+        "description": "Standard lightweight and fast audio processing model.",
+        "is_recommended": False,
+    },
+    {
+        "id": "gemini-2.5-pro",
+        "name": "Gemini 2.5 Pro",
+        "description": "Deep thinking model for complex multi-party financial extortion calls.",
+        "is_recommended": False,
+    },
+    {
+        "id": "gemini-1.5-pro",
+        "name": "Gemini 1.5 Pro",
+        "description": "High-capacity legacy reasoning model.",
+        "is_recommended": False,
+    },
+]
+
+def get_effective_api_key() -> str:
+    if _runtime_api_key is not None:
+        return _runtime_api_key
+    return GEMINI_API_KEY
+
+def get_effective_model() -> str:
+    return _runtime_model
+
+def mask_api_key(key: str) -> str:
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:6]}...{key[-4:]}"
+
+def set_runtime_gemini_key(key: str | None):
+    global _runtime_api_key, _client
+    if key is not None:
+        clean = key.strip()
+        _runtime_api_key = clean if clean else None
+    else:
+        _runtime_api_key = None
+    _client = None
+
+def set_runtime_gemini_model(model_name: str):
+    global _runtime_model
+    valid_ids = [m["id"] for m in SUPPORTED_MODELS]
+    if model_name in valid_ids:
+        _runtime_model = model_name
+
+def test_gemini_connection(api_key: str | None = None, model: str | None = None) -> tuple[bool, str, str, float | None]:
+    key = api_key if api_key is not None and api_key.strip() else get_effective_api_key()
+    mdl = model if model is not None and model.strip() else get_effective_model()
+
+    if not key:
+        return (False, "not_configured", "No Google Gemini API key configured. Switch to Demo mode or enter an API key.", None)
+
+    try:
+        client = genai.Client(api_key=key)
+        start = time.perf_counter()
+        resp = client.models.generate_content(
+            model=mdl,
+            contents="Respond strictly with the single word: OK",
+        )
+        latency = round((time.perf_counter() - start) * 1000, 1)
+        return (True, "active", f"API Key is active & operational ({latency}ms). Normal quota available on {mdl}.", latency)
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+            return (False, "rate_limited", f"Gemini API rate limit or quota exceeded (429 Resource Exhausted) on {mdl}. Please check your quota at Google AI Studio or use another key.", None)
+        elif "400" in err_str or "API_KEY_INVALID" in err_str or "invalid" in err_str.lower():
+            return (False, "invalid", "Invalid Google Gemini API key. Please check that you copied the complete key from Google AI Studio.", None)
+        elif "404" in err_str or "NOT_FOUND" in err_str:
+            return (False, "invalid", f"Model '{mdl}' is not accessible or not found with this API key.", None)
+        else:
+            return (False, "error", f"Connection error: {err_str[:90]}", None)
+
+def get_gemini_settings_status() -> dict:
+    eff_key = get_effective_api_key()
+    eff_model = get_effective_model()
+    has_active = bool(eff_key)
+    has_custom = _runtime_api_key is not None
+
+    if not has_active:
+        status = "not_configured"
+        msg = "No Google Gemini API key set. Operating in simulated benchmark demo mode."
+        latency = None
+    else:
+        status = "active"
+        msg = f"Operational with model {eff_model}."
+        latency = None
+
+    return {
+        "model": eff_model,
+        "has_active_key": has_active,
+        "has_custom_key": has_custom,
+        "masked_key": mask_api_key(eff_key),
+        "status": status,
+        "status_message": msg,
+        "latency_ms": latency,
+        "supported_models": SUPPORTED_MODELS,
+    }
 
 def _get_client() -> genai.Client:
     global _client
+    key = get_effective_api_key()
+    if not key:
+        raise ValueError("No Gemini API key configured.")
     if _client is None:
-        _client = genai.Client(api_key=GEMINI_API_KEY)
+        _client = genai.Client(api_key=key)
     return _client
 
 SYSTEM_PROMPT = """You are Suraksha AI — an expert real-time scam call detection and voice safety assistant designed to protect citizens (especially senior citizens in India) from fraudulent phone calls.
@@ -123,7 +244,7 @@ def analyze_chunk(
     elapsed_sec: float,
     lang: str = "gu",
 ) -> AnalyzeResponse:
-    if not GEMINI_API_KEY:
+    if not get_effective_api_key():
         return degraded_response(context_summary, lang)
 
     prompt_text = (
@@ -137,7 +258,7 @@ def analyze_chunk(
     try:
         client = _get_client()
         result = client.models.generate_content(
-            model=GEMINI_MODEL,
+            model=get_effective_model(),
             contents=[
                 types.Content(
                     role="user",
@@ -253,7 +374,7 @@ def degraded_text_response(transcript: str, lang: str = "gu") -> AnalyzeResponse
     )
 
 def analyze_text_call(transcript: str, lang: str = "gu") -> AnalyzeResponse:
-    if not GEMINI_API_KEY:
+    if not get_effective_api_key():
         return degraded_text_response(transcript, lang)
 
     prompt_text = (
@@ -268,7 +389,7 @@ def analyze_text_call(transcript: str, lang: str = "gu") -> AnalyzeResponse:
     try:
         client = _get_client()
         result = client.models.generate_content(
-            model=GEMINI_MODEL,
+            model=get_effective_model(),
             contents=[prompt_text],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,

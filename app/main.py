@@ -4,15 +4,35 @@ import io
 import tempfile
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import edge_tts
-from gtts import gTTS
 
-from app.config import ALLOWED_ORIGINS, GEMINI_API_KEY, GEMINI_MODEL
-from app.gemini_service import analyze_chunk, analyze_text_call, degraded_response, now_ts
+try:
+    import edge_tts
+except ImportError:
+    edge_tts = None
+
+try:
+    from gtts import gTTS
+except ImportError:
+    gTTS = None
+
+from app.config import ALLOWED_ORIGINS
+from app.gemini_service import (
+    analyze_chunk,
+    analyze_text_call,
+    degraded_response,
+    get_effective_api_key,
+    get_effective_model,
+    get_gemini_settings_status,
+    now_ts,
+    set_runtime_gemini_key,
+    set_runtime_gemini_model,
+    test_gemini_connection,
+)
 from app.schemas import (
     AlertRequest, AlertResponse,
     AnalyzeRequest, AnalyzeResponse, AnalyzeTextRequest,
-    TTSRequest, TTSResponse,
+    GeminiSettingsResponse, TestGeminiKeyRequest, TestGeminiKeyResponse,
+    TTSRequest, TTSResponse, UpdateGeminiSettingsRequest,
 )
 
 app = FastAPI(title="Suraksha AI — Real-Time Scam Protection API")
@@ -37,10 +57,73 @@ def health():
     return {
         "status": "ok",
         "service": "Suraksha AI",
-        "model": GEMINI_MODEL,
-        "has_gemini_key": bool(GEMINI_API_KEY),
-        "natural_voice_engine": "edge-tts-neural",
+        "model": get_effective_model(),
+        "has_gemini_key": bool(get_effective_api_key()),
+        "natural_voice_engine": "edge-tts-neural" if edge_tts is not None else "gtts-neural",
     }
+
+@app.get("/api/settings/gemini", response_model=GeminiSettingsResponse)
+def get_gemini_settings():
+    """Returns current active model, key status, and supported models."""
+    return get_gemini_settings_status()
+
+@app.post("/api/settings/gemini", response_model=GeminiSettingsResponse)
+def update_gemini_settings(req: UpdateGeminiSettingsRequest):
+    """
+    Updates Gemini model and/or custom API key.
+    Tests the key and saves it if valid or updates model selection.
+    """
+    if req.model:
+        set_runtime_gemini_model(req.model)
+
+    if req.api_key is not None:
+        clean_key = req.api_key.strip()
+        if clean_key:
+            # Test key before setting
+            is_active, status, msg, latency = test_gemini_connection(
+                api_key=clean_key,
+                model=req.model or get_effective_model(),
+            )
+            # Persist key in runtime
+            set_runtime_gemini_key(clean_key)
+            resp = get_gemini_settings_status()
+            resp["status"] = status
+            resp["status_message"] = msg
+            resp["latency_ms"] = latency
+            return resp
+        else:
+            set_runtime_gemini_key(None)
+
+    return get_gemini_settings_status()
+
+@app.delete("/api/settings/gemini", response_model=GeminiSettingsResponse)
+def delete_gemini_key():
+    """
+    Deletes custom Gemini API key and reverts to server environment or demo mode.
+    """
+    set_runtime_gemini_key(None)
+    status_info = get_gemini_settings_status()
+    status_info["status_message"] = "Custom API Key removed. Reset to system default or demo benchmark mode."
+    return status_info
+
+@app.post("/api/settings/gemini/test", response_model=TestGeminiKeyResponse)
+def test_gemini_key_endpoint(req: TestGeminiKeyRequest):
+    """
+    Actively tests an API key against Google Gemini API,
+    measuring latency and verifying if quota limits have been reached.
+    """
+    target_model = req.model or get_effective_model()
+    is_active, status, msg, latency = test_gemini_connection(
+        api_key=req.api_key,
+        model=target_model,
+    )
+    return TestGeminiKeyResponse(
+        is_active=is_active,
+        status=status,
+        status_message=msg,
+        latency_ms=latency,
+        model=target_model,
+    )
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
@@ -94,21 +177,24 @@ async def text_to_speech(req: TTSRequest):
     lang_code = req.language if req.language in FEMALE_NEURAL_VOICES else "gu"
     voice = FEMALE_NEURAL_VOICES.get(lang_code, "gu-IN-DhwaniNeural")
 
-    try:
-        # Edge TTS High-Fidelity Female Neural Audio
-        communicate = edge_tts.Communicate(text=req.text, voice=voice)
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
-            temp_path = tf.name
+    if edge_tts is not None:
+        try:
+            # Edge TTS High-Fidelity Female Neural Audio
+            communicate = edge_tts.Communicate(text=req.text, voice=voice)
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+                temp_path = tf.name
 
-        await communicate.save(temp_path)
+            await communicate.save(temp_path)
 
-        with open(temp_path, "rb") as f:
-            audio_bytes = f.read()
+            with open(temp_path, "rb") as f:
+                audio_bytes = f.read()
 
-        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-        return TTSResponse(audio_b64=audio_b64, mime_type="audio/mp3")
-    except Exception as e:
-        print(f"Edge TTS error, trying fallback: {e}")
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            return TTSResponse(audio_b64=audio_b64, mime_type="audio/mp3")
+        except Exception as e:
+            print(f"Edge TTS error, trying fallback: {e}")
+
+    if gTTS is not None:
         try:
             tts = gTTS(text=req.text, lang=lang_code, tld=req.tld, slow=False)
             mp3_fp = io.BytesIO()
@@ -117,5 +203,6 @@ async def text_to_speech(req: TTSRequest):
             audio_b64 = base64.b64encode(mp3_fp.read()).decode("utf-8")
             return TTSResponse(audio_b64=audio_b64, mime_type="audio/mp3")
         except Exception as e2:
-            print(f"Fallback TTS error: {e2}")
-            return TTSResponse(audio_b64="", mime_type="audio/mp3")
+            print(f"Fallback gTTS error: {e2}")
+
+    return TTSResponse(audio_b64="", mime_type="audio/mp3")
