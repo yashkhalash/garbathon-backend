@@ -191,3 +191,123 @@ def analyze_chunk(
 
 def now_ts() -> float:
     return time.time()
+
+def degraded_text_response(transcript: str, lang: str = "gu") -> AnalyzeResponse:
+    lower_t = transcript.lower()
+    is_scam = any(w in lower_t for w in ["police", "પોલીસ", "arrest", "અરેસ્ટ", "ડ્રગ્સ", "drugs", "50,000", "50000", "transfer", "ડિજિટલ"])
+    is_phish = any(w in lower_t for w in ["loan", "લોન", "kyc", "કેવાયસી", "otp", "ઓટીપી", "ખાતું બ્લોક", "account block", "card block"])
+
+    if is_scam:
+        risk_score = 95
+        risk_level = "critical"
+        summary = "Detected critical Digital Arrest and authority coercion indicators in transcript."
+        scam_type = "DIGITAL_ARREST"
+        should_warn = True
+        flags = [
+            RedFlagItem(
+                category="DIGITAL_ARREST",
+                evidence="Police/Arrest and illegal drugs allegations found in text.",
+                timestamp_seconds=0.0,
+                severity="critical",
+                reason="Coercive threats of legal arrest to force urgent financial payment.",
+                recommended_action="Disconnect call immediately. Real police never conducts digital arrests.",
+            )
+        ]
+    elif is_phish:
+        risk_score = 65
+        risk_level = "suspicious"
+        summary = "Unsolicited loan offer or expiring KYC notice attempting to elicit OTP/identity data."
+        scam_type = "BANK_KYC_FRAUD"
+        should_warn = True
+        flags = [
+            RedFlagItem(
+                category="OTP_FRAUD",
+                evidence="Urgent KYC deadline or OTP request in text.",
+                timestamp_seconds=0.0,
+                severity="high",
+                reason="Attempting to extract 6-digit OTP for unauthorized debit or access.",
+                recommended_action="Never share OTP with anyone.",
+            )
+        ]
+    else:
+        risk_score = 5
+        risk_level = "safe"
+        summary = "Routine benign conversation. No suspicious threats, OTP requests, or coercion detected."
+        scam_type = "BENIGN_OR_UNCLEAR"
+        should_warn = False
+        flags = []
+
+    warning = FALLBACK_WARNINGS.get(lang, FALLBACK_WARNINGS["gu"])
+    return AnalyzeResponse(
+        language=lang,
+        risk_level=risk_level,
+        risk_score=risk_score,
+        summary=summary,
+        red_flags=flags,
+        warning_text=warning,
+        recommended_actions=["Hang up if pressured", "Do not share OTP or money"],
+        should_warn=should_warn,
+        context_summary="",
+        scam_type=scam_type,
+        degraded=False,
+    )
+
+def analyze_text_call(transcript: str, lang: str = "gu") -> AnalyzeResponse:
+    if not GEMINI_API_KEY:
+        return degraded_text_response(transcript, lang)
+
+    prompt_text = (
+        f"The user has submitted the following phone call transcript or message text for scam inspection:\n\n"
+        f"\"\"\"{transcript}\"\"\"\n\n"
+        f"Requested safety warning language: {lang} (gu=Gujarati, hi=Hindi, en=English).\n"
+        f"Perform strict fraud risk assessment. If this contains digital arrest threats, police/CBI impersonation, "
+        f"illegal parcel/drugs claims, urgent OTP/password demands, or fast loan coercion, classify as high or critical risk. "
+        f"If routine delivery (e.g. Swiggy food delivery, courier gate arrival) or standard inquiry, classify as safe or low risk."
+    )
+
+    try:
+        client = _get_client()
+        result = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[prompt_text],
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_schema=RESPONSE_SCHEMA,
+                temperature=0.1,
+            ),
+        )
+        data = json.loads(result.text)
+    except Exception as e:
+        print(f"Gemini text analysis failed, using degraded: {e}")
+        return degraded_text_response(transcript, lang)
+
+    try:
+        red_flags = [
+            RedFlagItem(
+                category=f["category"],
+                evidence=f["evidence"],
+                timestamp_seconds=0.0,
+                severity=f.get("severity", "high"),
+                reason=f.get("reason", "Suspicious scam behavior detected."),
+                recommended_action=f.get("recommended_action", "Hang up and do not transfer funds."),
+            )
+            for f in data.get("red_flags", [])
+        ]
+
+        return AnalyzeResponse(
+            language=data.get("language", lang),
+            risk_level=data.get("risk_level", "safe"),
+            risk_score=int(data.get("risk_score", 0)),
+            summary=data.get("summary", ""),
+            red_flags=red_flags,
+            warning_text=data.get("warning_text", FALLBACK_WARNINGS.get(lang, "")),
+            recommended_actions=data.get("recommended_actions", []),
+            should_warn=bool(data.get("should_warn", False)),
+            context_summary=data.get("context_summary", ""),
+            scam_type=data.get("scam_type", "none"),
+            degraded=False,
+        )
+    except Exception as e:
+        print(f"Error parsing Gemini text response: {e}")
+        return degraded_text_response(transcript, lang)

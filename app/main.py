@@ -8,10 +8,10 @@ import edge_tts
 from gtts import gTTS
 
 from app.config import ALLOWED_ORIGINS, GEMINI_API_KEY, GEMINI_MODEL
-from app.gemini_service import analyze_chunk, degraded_response, now_ts
+from app.gemini_service import analyze_chunk, analyze_text_call, degraded_response, now_ts
 from app.schemas import (
     AlertRequest, AlertResponse,
-    AnalyzeRequest, AnalyzeResponse,
+    AnalyzeRequest, AnalyzeResponse, AnalyzeTextRequest,
     TTSRequest, TTSResponse,
 )
 
@@ -54,6 +54,13 @@ def analyze(req: AnalyzeRequest):
         mime_type=req.mime_type,
         context_summary=req.context_summary,
         elapsed_sec=req.elapsed_sec,
+        lang=req.language,
+    )
+
+@app.post("/api/analyze-text", response_model=AnalyzeResponse)
+def analyze_text(req: AnalyzeTextRequest):
+    return analyze_text_call(
+        transcript=req.text,
         lang=req.language,
     )
 

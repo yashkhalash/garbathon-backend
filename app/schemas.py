@@ -30,6 +30,10 @@ class AnalyzeRequest(BaseModel):
     elapsed_sec: float = 0.0
     language: str = "gu"
 
+class AnalyzeTextRequest(BaseModel):
+    text: str
+    language: str = "gu"
+
 class AnalyzeResponse(BaseModel):
     language: str
     risk_level: RiskLevel
